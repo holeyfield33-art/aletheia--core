@@ -340,6 +340,7 @@ def insert_receipt(file_path, status, receipt_data, violations=None):
     )
     conn.commit()
     conn.close()
+    return chain_hash
 
 
 def upgrade_db_add_hash_chain():
@@ -367,6 +368,16 @@ def upgrade_db_add_hash_chain():
         conn.commit()
         print(f"[Audit] Backfilled {len(rows)} existing receipts with hash chain.")
     conn.close()
+
+
+def get_chain_tip() -> str:
+    """Return the latest hash_chain value from the ledger, or 'genesis'."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT hash_chain FROM receipts ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else "genesis"
 
 
 # ---------------------------------------------------------------------------
@@ -421,14 +432,21 @@ def quarantine_file(file_path, diff_hash, violation_log):
     signature = sign_receipt(credential_subject)
     receipt_data["Causal_Filter_Signature"] = signature
 
+    # Persist to audit DB and get the chain hash for forensic linking
+    chain_hash = insert_receipt(file_path, "Red", receipt_data, violation_log)
+
+    # Link the quarantined file to its ledger entry
+    credential_subject["quarantine"]["hashChainId"] = chain_hash
+    # Re-sign with the forensic link included
+    signature = sign_receipt(credential_subject)
+    receipt_data["Causal_Filter_Signature"] = signature
+
+    print(f"\nQuarantine Notification: Linked to Ledger Entry {chain_hash}")
     print("\nGenerated Quarantine Receipt (JSON-LD):")
     print(json.dumps(receipt_data, indent=4))
 
     ok = verify_receipt(credential_subject, signature)
     print(f"Signature self-check: {'VALID' if ok else 'INVALID'}")
-
-    # Persist to audit DB
-    insert_receipt(file_path, "Red", receipt_data, violation_log)
 
     return receipt_data
 
@@ -474,11 +492,13 @@ def broadcast_heartbeat():
         except OSError:
             break
         if data.decode(errors="replace").strip().lower() == "ping":
+            chain_tip = get_chain_tip()
             credential_subject = {
                 "nodeId": _NODE_ID,
                 "status": "Secure",
                 "lastScan": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "teeMeasurement": get_tee_measurement(),
+                "chainTip": chain_tip,
                 "health": {
                     "quarantineCount": _quarantine_count,
                     "uptimeSeconds": round(time.time() - _start_time, 1),
@@ -492,7 +512,8 @@ def broadcast_heartbeat():
                 "Causal_Filter_Signature": sign_receipt(credential_subject),
             }
             sock.sendto(json.dumps(heartbeat).encode(), addr)
-            print(f"[Heartbeat] Ping reply -> {addr[0]}:{addr[1]}")
+            print(f"[Heartbeat] Ping reply -> {addr[0]}:{addr[1]} "
+                  f"(Chain Tip: {chain_tip[:10]}...)")
 
 
 def send_heartbeat(broadcast_addr: tuple[str, int] = ('255.255.255.255', 12345)):
@@ -507,10 +528,12 @@ def send_heartbeat(broadcast_addr: tuple[str, int] = ('255.255.255.255', 12345))
     while True:
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         tee_hash = get_tee_measurement()
+        chain_tip = get_chain_tip()
         credential_subject = {
             "nodeId": _NODE_ID,
             "timestamp": timestamp,
             "teeMeasurement": tee_hash,
+            "chainTip": chain_tip,
             "status": "Secure",
             "health": {
                 "quarantineCount": _quarantine_count,
@@ -527,7 +550,8 @@ def send_heartbeat(broadcast_addr: tuple[str, int] = ('255.255.255.255', 12345))
         }
         try:
             sock.sendto(json.dumps(heartbeat_data).encode(), broadcast_addr)
-            print(f"[Heartbeat] Broadcast: {timestamp} (TEE: {tee_hash[:10]}...)")
+            print(f"[Heartbeat] Broadcast: {timestamp} "
+                  f"(TEE: {tee_hash[:10]}..., Chain Tip: {chain_tip[:10]}...)")
         except OSError as e:
             print(f"[Heartbeat] Broadcast failed: {e}")
         time.sleep(60)
