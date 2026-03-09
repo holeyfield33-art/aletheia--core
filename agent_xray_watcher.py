@@ -19,6 +19,7 @@ import socket
 import sqlite3
 import threading
 import uuid
+from typing import cast
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from ecdsa import SigningKey, VerifyingKey, SECP256k1
@@ -251,8 +252,8 @@ def get_hardware_bound_signing_key():
 # ---------------------------------------------------------------------------
 # ECDSA Receipt Signer  (hardware-bound)
 # ---------------------------------------------------------------------------
-_signing_key = get_hardware_bound_signing_key()
-_verifying_key = _signing_key.get_verifying_key()
+_signing_key: SigningKey = get_hardware_bound_signing_key()
+_verifying_key = cast(VerifyingKey, _signing_key.get_verifying_key())
 print(f"[Agent X-ray] Hardware-bound ECDSA public key: "
       f"{_verifying_key.to_string().hex()}")
 
@@ -473,7 +474,7 @@ class AgentXrayHandler(FileSystemEventHandler):
     def on_modified(self, event):
         if event.is_directory:
             return
-        file_path = event.src_path
+        file_path: str = str(event.src_path)
 
         # Ignore hidden paths (.git, etc.)
         if any(part.startswith(".") for part in file_path.split(os.sep)):
@@ -569,7 +570,7 @@ class AgentXrayHandler(FileSystemEventHandler):
     def on_created(self, event):
         if event.is_directory:
             return
-        file_path = event.src_path
+        file_path: str = str(event.src_path)
         lines = _safe_read_lines(file_path)
         if lines is not None:
             file_cache[file_path] = lines
@@ -578,7 +579,7 @@ class AgentXrayHandler(FileSystemEventHandler):
     def on_deleted(self, event):
         if event.is_directory:
             return
-        file_path = event.src_path
+        file_path: str = str(event.src_path)
         file_cache.pop(file_path, None)
         print(f"\n[-] File removed from cache: {file_path}")
 

@@ -1,6 +1,6 @@
 # aletheia-core
 
-**TMRP — Trusted Machine-Readable Provenance**
+TMRP — Trusted Machine-Readable Provenance
 
 Agent X-ray Watcher (Snapshot Engine) for monitoring code changes, running an AST-based Causal Filter, generating ECDSA-signed Sovereign Receipts, **quarantining malicious files** (Active Interlock), **broadcasting node health** over UDP (Heartbeat), **hardware-bound key derivation** (HKDF), and **persistent SQLite audit logging**.
 
@@ -33,7 +33,7 @@ Edit any `.py` file in the repo — the watcher prints the diff, trust mark, and
 Receipts follow the [W3C Verifiable Credentials v2](https://www.w3.org/TR/vc-data-model-2.0/) `@context`. Key fields:
 
 | Field | Description |
-|---|---|
+| --- | --- |
 | `credentialSubject.diffHash` | SHA-256 of the unified diff |
 | `credentialSubject.filterResult.pass` | `true` (Green) / `false` (Red) |
 | `credentialSubject.filterResult.reason` | Human-readable summary |
@@ -61,7 +61,7 @@ See [sample_red_receipt.json](sample_red_receipt.json) for a complete Red receip
 When the interlock activates, a `QuarantineReceipt` is generated with extra fields:
 
 | Field | Description |
-|---|---|
+| --- | --- |
 | `credentialSubject.quarantinedPath` | Path the file was renamed to (`.locked`) |
 | `credentialSubject.quarantine.timestamp` | ISO 8601 UTC timestamp of quarantine |
 | `credentialSubject.quarantine.action` | Always `"file_locked"` |
@@ -95,7 +95,7 @@ sqlite3 audit.sqlite "SELECT id, timestamp, status, file_path FROM receipts ORDE
 Schema:
 
 | Column | Type | Description |
-|---|---|---|
+| --- | --- | --- |
 | `id` | INTEGER | Auto-increment primary key |
 | `timestamp` | TEXT | ISO 8601 UTC |
 | `file_path` | TEXT | Absolute path of the scanned file |
@@ -120,7 +120,7 @@ print("Valid" if ok else "Invalid")
 
 ## Project Structure
 
-```
+```text
 agent_xray_watcher.py    # Watcher + Causal Filter + Signer + Interlock + Heartbeat
 sample_red_receipt.json   # Example Red receipt for demos / audit trail
 audit.sqlite              # Auto-created SQLite audit DB (gitignored)
