@@ -24,9 +24,9 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from ecdsa import SigningKey, VerifyingKey, SECP256k1
 
-# Path to this script — excluded from Active Interlock quarantine because
-# the watcher itself legitimately uses socket/threading for the heartbeat.
-_SELF_PATH = os.path.abspath(__file__)
+# Self-exclusion: the watcher script is excluded from Active Interlock
+# quarantine because it legitimately uses socket/threading for heartbeat.
+WATCHER_SCRIPT = os.path.basename(__file__)  # 'agent_xray_watcher.py'
 
 # ---------------------------------------------------------------------------
 # AST Causal Filter  (DeepSeek integration)
@@ -368,7 +368,7 @@ def quarantine_file(file_path, diff_hash, violation_log):
         "type": ["SovereignReceipt", "QuarantineReceipt"],
         "issuer": "Aletheia Sovereign Node",
         "credentialSubject": credential_subject,
-        "TEE_Measurement_Hash": "placeholder_tee_hash",
+        "TEE_Measurement_Hash": get_tee_measurement(),
         "Sandbox_Public_Key_Registry_Link": "https://example.com/registry",
         "Causal_Filter_Signature": "",
     }
@@ -385,6 +385,16 @@ def quarantine_file(file_path, diff_hash, violation_log):
     insert_receipt(file_path, "Red", receipt_data, violation_log)
 
     return receipt_data
+
+
+# ---------------------------------------------------------------------------
+# TEE Measurement (placeholder for DeepSeek hardware hash)
+# ---------------------------------------------------------------------------
+def get_tee_measurement() -> str:
+    """Return a SHA-256 hash of the hardware identifier for TEE measurement."""
+    hw_id = get_hardware_id()
+    seed = hw_id if hw_id is not None else uuid.uuid4().bytes
+    return hashlib.sha256(seed).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +420,7 @@ def broadcast_heartbeat():
         print(f"[Heartbeat] Could not bind port {_BROADCAST_PORT}: {e}")
         return
 
-    print(f"[Heartbeat] Broadcast server listening on UDP :{_BROADCAST_PORT}")
+    print(f"[Heartbeat] Ping listener on UDP :{_BROADCAST_PORT}")
 
     while True:
         try:
@@ -422,6 +432,7 @@ def broadcast_heartbeat():
                 "nodeId": _NODE_ID,
                 "status": "Secure",
                 "lastScan": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "teeMeasurement": get_tee_measurement(),
                 "health": {
                     "quarantineCount": _quarantine_count,
                     "uptimeSeconds": round(time.time() - _start_time, 1),
@@ -435,7 +446,45 @@ def broadcast_heartbeat():
                 "Causal_Filter_Signature": sign_receipt(credential_subject),
             }
             sock.sendto(json.dumps(heartbeat).encode(), addr)
-            print(f"[Heartbeat] Sent to {addr[0]}:{addr[1]}")
+            print(f"[Heartbeat] Ping reply -> {addr[0]}:{addr[1]}")
+
+
+def send_heartbeat(broadcast_addr: tuple[str, int] = ('255.255.255.255', 12345)):
+    """
+    Actively broadcast a signed HeartbeatReceipt via UDP every 60 seconds.
+    Runs as a daemon thread so other TMRP nodes on the LAN can passively
+    monitor this node's health without sending pings.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+
+    while True:
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        tee_hash = get_tee_measurement()
+        credential_subject = {
+            "nodeId": _NODE_ID,
+            "timestamp": timestamp,
+            "teeMeasurement": tee_hash,
+            "status": "Secure",
+            "health": {
+                "quarantineCount": _quarantine_count,
+                "uptimeSeconds": round(time.time() - _start_time, 1),
+            },
+        }
+        signature = sign_receipt(credential_subject)
+        heartbeat_data = {
+            "@context": "https://www.w3.org/ns/credentials/v2",
+            "type": ["HeartbeatReceipt"],
+            "issuer": "Aletheia Sovereign Node",
+            "credentialSubject": credential_subject,
+            "Causal_Filter_Signature": signature,
+        }
+        try:
+            sock.sendto(json.dumps(heartbeat_data).encode(), broadcast_addr)
+            print(f"[Heartbeat] Broadcast: {timestamp} (TEE: {tee_hash[:10]}...)")
+        except OSError as e:
+            print(f"[Heartbeat] Broadcast failed: {e}")
+        time.sleep(60)
 
 
 # ---------------------------------------------------------------------------
@@ -520,9 +569,9 @@ class AgentXrayHandler(FileSystemEventHandler):
             diff_hash = hashlib.sha256(diff_str.encode()).hexdigest()
 
             if not filter_pass:
-                # Skip self-quarantine: the watcher itself uses socket/threading
-                if os.path.abspath(file_path) == _SELF_PATH:
-                    print("\n[SKIP] Watcher script modified — interlock bypassed (self-exclusion).")
+                # Self-exclusion: skip quarantine for the watcher's own script
+                if os.path.basename(file_path) == WATCHER_SCRIPT:
+                    print(f"\nSelf-exclusion: Ignoring modifications to {file_path}")
                     file_cache[file_path] = new_lines
                 else:
                     # --- Active Interlock: quarantine the file ---
@@ -543,7 +592,7 @@ class AgentXrayHandler(FileSystemEventHandler):
                     "type": ["SovereignReceipt"],
                     "issuer": "Aletheia-Core Watcher",
                     "credentialSubject": credential_subject,
-                    "TEE_Measurement_Hash": "placeholder_tee_hash",
+                    "TEE_Measurement_Hash": get_tee_measurement(),
                     "Sandbox_Public_Key_Registry_Link": "https://example.com/registry",
                     "Causal_Filter_Signature": "",
                 }
@@ -601,9 +650,10 @@ def run_watcher(repo_path: str = "."):
     observer.schedule(event_handler, repo_path, recursive=True)
     observer.start()
 
-    # Start the UDP heartbeat broadcast in a daemon thread
-    heartbeat_thread = threading.Thread(target=broadcast_heartbeat, daemon=True)
-    heartbeat_thread.start()
+    # Start the UDP heartbeat ping listener in a daemon thread
+    threading.Thread(target=broadcast_heartbeat, daemon=True).start()
+    # Start the active heartbeat broadcast (every 60s) in a daemon thread
+    threading.Thread(target=send_heartbeat, daemon=True).start()
 
     print(f"Agent X-ray Watcher active — monitoring {repo_path}")
     print(f"Node ID: {_NODE_ID}")
