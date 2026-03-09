@@ -1,0 +1,38 @@
+{
+    "@context": "https://www.w3.org/ns/credentials/v2",
+    "type": [
+        "SovereignReceipt"
+    ],
+    "issuer": "Aletheia-Core Watcher",
+    "credentialSubject": {
+        "filePath": "/workspaces/aletheia--core/test_malicious.py",
+        "diffHash": "04ab69287323147e71b60c4d3fa739a20c403d46d50ec59cdb80db07baebefa7",
+        "filterResult": {
+            "pass": false,
+            "reason": "Violations found: line 1: import of dangerous module 'socket'; line 8: call to dangerous function 'os.system'; line 9: call to dangerous function 'socket.socket'"
+        },
+        "violation_log": [
+            {
+                "line": 1,
+                "issue": "import of dangerous module 'socket'",
+                "severity": "high",
+                "category": "dangerous_import"
+            },
+            {
+                "line": 8,
+                "issue": "call to dangerous function 'os.system'",
+                "severity": "critical",
+                "category": "dangerous_call"
+            },
+            {
+                "line": 9,
+                "issue": "call to dangerous function 'socket.socket'",
+                "severity": "critical",
+                "category": "dangerous_call"
+            }
+        ]
+    },
+    "TEE_Measurement_Hash": "placeholder_tee_hash",
+    "Sandbox_Public_Key_Registry_Link": "https://example.com/registry",
+    "Causal_Filter_Signature": "739515127044431b312ea78c349a86d7d9ffe803e2c89af18ae328401b4072738bad8e8cd06d5d9d49e9e4a53ed3a5a9de90783e3a32a00d80db5982e2ec32a8"
+}
