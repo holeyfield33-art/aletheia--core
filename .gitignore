@@ -1,1 +1,4 @@
 __pycache__/
+audit.sqlite
+audit.sqlite-journal
+*.locked

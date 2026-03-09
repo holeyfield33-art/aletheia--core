@@ -12,14 +12,20 @@ import sys
 import ast
 import time
 import hashlib
+import hmac
 import difflib
 import json
 import socket
+import sqlite3
 import threading
 import uuid
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from ecdsa import SigningKey, VerifyingKey, SECP256k1
+
+# Path to this script — excluded from Active Interlock quarantine because
+# the watcher itself legitimately uses socket/threading for the heartbeat.
+_SELF_PATH = os.path.abspath(__file__)
 
 # ---------------------------------------------------------------------------
 # AST Causal Filter  (DeepSeek integration)
@@ -152,13 +158,102 @@ def check_causal_filter(code_str):
 
 
 # ---------------------------------------------------------------------------
-# ECDSA Receipt Signer  (DeepSeek integration)
+# Hardware-Bound Key Derivation
 # ---------------------------------------------------------------------------
-# Generate a persistent SECP256k1 key pair for this session.
-# In production, load from a secure store.
-_signing_key = SigningKey.generate(curve=SECP256k1)
+def get_hardware_id():
+    """
+    Retrieve a stable hardware identifier from the system.
+    Tries multiple platform-specific sources.  Returns bytes or None.
+    """
+    # 1. Linux DMI product UUID
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/sys/class/dmi/id/product_uuid", "rb") as f:
+                return f.read().strip()
+        except (PermissionError, FileNotFoundError, OSError):
+            pass
+
+    # 2. MAC address via uuid.getnode (cross-platform)
+    try:
+        mac = uuid.getnode()  # 48-bit integer
+        return mac.to_bytes(6, "big")
+    except Exception:
+        pass
+
+    # 3. Windows WMI CSProduct UUID
+    if sys.platform == "win32":
+        try:
+            import subprocess as _sp
+            output = _sp.check_output(
+                ["wmic", "csproduct", "get", "uuid"], text=True, timeout=5
+            )
+            lines = output.strip().split("\n")
+            if len(lines) >= 2 and lines[1].strip():
+                return lines[1].strip().encode("utf-8")
+        except Exception:
+            pass
+
+    # 4. macOS IOPlatformUUID
+    if sys.platform == "darwin":
+        try:
+            import subprocess as _sp
+            output = _sp.check_output(
+                ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                text=True, timeout=5,
+            )
+            for line in output.split("\n"):
+                if "IOPlatformUUID" in line:
+                    return line.split('"')[-2].encode("utf-8")
+        except Exception:
+            pass
+
+    # 5. FreeBSD /etc/hostid
+    try:
+        with open("/etc/hostid", "rb") as f:
+            return f.read(16)
+    except (FileNotFoundError, OSError):
+        pass
+
+    return None
+
+
+def get_hardware_bound_signing_key():
+    """
+    Derive a persistent SECP256k1 signing key from a hardware fingerprint
+    using HKDF (RFC 5869).  Falls back to an ephemeral random key if no
+    hardware ID is available.
+    """
+    hardware_id = get_hardware_id()
+    if hardware_id is None:
+        print("[WARN] No hardware identifier found. Using ephemeral random key.")
+        return SigningKey.generate(curve=SECP256k1)
+
+    hash_algo = hashlib.sha256
+    salt = b"Aletheia-HW-Salt-2026"
+    info = b"TMRP signing key"
+
+    # HKDF-Extract
+    prk = hmac.new(salt, hardware_id, hash_algo).digest()
+
+    # HKDF-Expand (need 32 bytes for SECP256k1)
+    length = 32
+    block_size = hash_algo().digest_size
+    t = b""
+    okm = b""
+    for i in range(1, (length + block_size - 1) // block_size + 1):
+        t = hmac.new(prk, t + info + bytes([i]), hash_algo).digest()
+        okm += t
+    derived_key = okm[:length]
+
+    return SigningKey.from_string(derived_key, curve=SECP256k1)
+
+
+# ---------------------------------------------------------------------------
+# ECDSA Receipt Signer  (hardware-bound)
+# ---------------------------------------------------------------------------
+_signing_key = get_hardware_bound_signing_key()
 _verifying_key = _signing_key.get_verifying_key()
-print(f"[Agent X-ray] ECDSA public key (for receipt verification): "
+print(f"[Agent X-ray] Hardware-bound ECDSA public key: "
       f"{_verifying_key.to_string().hex()}")
 
 
@@ -185,6 +280,46 @@ def verify_receipt(data_dict, signature_hex):
         return _verifying_key.verify(sig_bytes, data_bytes)
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# SQLite Audit Database
+# ---------------------------------------------------------------------------
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audit.sqlite")
+
+
+def init_db():
+    """Create the receipts table if it doesn't exist."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS receipts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            file_path TEXT,
+            status TEXT NOT NULL,
+            receipt_json TEXT NOT NULL,
+            violation_log JSON
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def insert_receipt(file_path, status, receipt_data, violations=None):
+    """Insert a receipt into the audit database."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    receipt_json = json.dumps(receipt_data, ensure_ascii=False)
+    violation_json = json.dumps(violations) if violations else None
+    c.execute(
+        "INSERT INTO receipts (timestamp, file_path, status, receipt_json, violation_log) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (timestamp, file_path, status, receipt_json, violation_json),
+    )
+    conn.commit()
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +379,10 @@ def quarantine_file(file_path, diff_hash, violation_log):
 
     ok = verify_receipt(credential_subject, signature)
     print(f"Signature self-check: {'VALID' if ok else 'INVALID'}")
+
+    # Persist to audit DB
+    insert_receipt(file_path, "Red", receipt_data, violation_log)
+
     return receipt_data
 
 
@@ -380,11 +519,16 @@ class AgentXrayHandler(FileSystemEventHandler):
             diff_hash = hashlib.sha256(diff_str.encode()).hexdigest()
 
             if not filter_pass:
-                # --- Active Interlock: quarantine the file ---
-                quarantine_file(file_path, diff_hash, violation_log)
-                # Remove quarantined path from cache; the .locked file
-                # won't be monitored as a .py file.
-                file_cache.pop(file_path, None)
+                # Skip self-quarantine: the watcher itself uses socket/threading
+                if os.path.abspath(file_path) == _SELF_PATH:
+                    print("\n[SKIP] Watcher script modified — interlock bypassed (self-exclusion).")
+                    file_cache[file_path] = new_lines
+                else:
+                    # --- Active Interlock: quarantine the file ---
+                    quarantine_file(file_path, diff_hash, violation_log)
+                    # Remove quarantined path from cache; the .locked file
+                    # won't be monitored as a .py file.
+                    file_cache.pop(file_path, None)
             else:
                 # --- Standard Sovereign Receipt for clean code ---
                 credential_subject = {
@@ -410,6 +554,9 @@ class AgentXrayHandler(FileSystemEventHandler):
 
                 ok = verify_receipt(credential_subject, signature)
                 print(f"Signature self-check: {'VALID' if ok else 'INVALID'}")
+
+                # Persist to audit DB
+                insert_receipt(file_path, "Green", receipt_data)
 
                 # Update the cache only for clean files
                 file_cache[file_path] = new_lines
@@ -444,6 +591,9 @@ def run_watcher(repo_path: str = "."):
     if not os.path.isdir(repo_path):
         print(f"Error: '{repo_path}' is not a directory.", file=sys.stderr)
         sys.exit(1)
+
+    init_db()
+    print(f"[Audit] Database at {DB_PATH}")
 
     event_handler = AgentXrayHandler(repo_path)
     observer = Observer()
