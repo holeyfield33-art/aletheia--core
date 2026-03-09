@@ -2,7 +2,7 @@
 
 **TMRP — Trusted Machine-Readable Provenance**
 
-Agent X-ray Watcher (Snapshot Engine) for monitoring code changes, running an AST-based Causal Filter, and generating ECDSA-signed Sovereign Receipts.
+Agent X-ray Watcher (Snapshot Engine) for monitoring code changes, running an AST-based Causal Filter, generating ECDSA-signed Sovereign Receipts, **quarantining malicious files** (Active Interlock), and **broadcasting node health** over UDP (Heartbeat).
 
 ## Quick Start
 
@@ -22,7 +22,9 @@ Edit any `.py` file in the repo — the watcher prints the diff, trust mark, and
    - Dangerous function calls (`os.system`, `eval`, `exec`, `subprocess.Popen`, …)
    - Each violation includes **line number**, **issue description**, **severity** (`high` / `critical`), and **category**.
 4. **Trust Mark** — `Green` (all clear) or `Red` (violations detected).
-5. **Sovereign Receipt** — A JSON-LD credential containing the diff hash, filter result, and structured `violation_log`, signed with ECDSA (SECP256k1).
+5. **Active Interlock** — When the filter returns Red, the file is immediately renamed to `<file>.locked` (quarantined) and a **QuarantineReceipt** is generated with violation details and timestamp.
+6. **Sovereign Receipt** — A JSON-LD credential containing the diff hash, filter result, and structured `violation_log`, signed with ECDSA (SECP256k1).
+7. **Heartbeat Broadcast** — A UDP server (default port `12345`, configurable via `ALETHEIA_BROADCAST_PORT` env var) responds to `ping` messages with a signed **HeartbeatReceipt** reporting node ID, security status, quarantine count, and uptime.
 
 ## Receipt Format
 
@@ -51,6 +53,34 @@ Receipts follow the [W3C Verifiable Credentials v2](https://www.w3.org/TR/vc-dat
 - **category**: `dangerous_import`, `dangerous_call`, `dangerous_builtin`, or `parse_error`.
 
 See [sample_red_receipt.json](sample_red_receipt.json) for a complete Red receipt example.
+
+### Quarantine Receipt
+
+When the interlock activates, a `QuarantineReceipt` is generated with extra fields:
+
+| Field | Description |
+|---|---|
+| `credentialSubject.quarantinedPath` | Path the file was renamed to (`.locked`) |
+| `credentialSubject.quarantine.timestamp` | ISO 8601 UTC timestamp of quarantine |
+| `credentialSubject.quarantine.action` | Always `"file_locked"` |
+| `type` | `["SovereignReceipt", "QuarantineReceipt"]` |
+
+### Heartbeat Receipt
+
+Send a UDP `ping` to receive a signed heartbeat:
+
+```bash
+python3 -c "
+import socket, json
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(3)
+s.sendto(b'ping', ('127.0.0.1', 12345))
+data, _ = s.recvfrom(4096)
+print(json.dumps(json.loads(data), indent=2))
+"
+```
+
+Fields: `nodeId`, `status`, `lastScan`, `health.quarantineCount`, `health.uptimeSeconds`.
 
 ## Verifying Signatures
 

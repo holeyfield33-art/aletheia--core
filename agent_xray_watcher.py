@@ -14,6 +14,9 @@ import time
 import hashlib
 import difflib
 import json
+import socket
+import threading
+import uuid
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from ecdsa import SigningKey, VerifyingKey, SECP256k1
@@ -185,6 +188,117 @@ def verify_receipt(data_dict, signature_hex):
 
 
 # ---------------------------------------------------------------------------
+# Active Interlock (Kill-Switch)
+# ---------------------------------------------------------------------------
+# Running tally of quarantine events for heartbeat reporting
+_quarantine_count = 0
+_last_scan_time = time.time()
+
+
+def quarantine_file(file_path, diff_hash, violation_log):
+    """
+    Quarantine a file flagged by the Causal Filter.
+
+    Renames ``file_path`` to ``<file_path>.locked`` and generates a
+    QuarantineReceipt extending the standard Sovereign Receipt schema.
+    """
+    global _quarantine_count
+    locked_path = f"{file_path}.locked"
+    try:
+        os.rename(file_path, locked_path)
+        print(f"\nINTERLOCK ACTIVATED: Quarantined {file_path} -> {locked_path}")
+    except OSError as e:
+        print(f"Interlock failed: {e}")
+        return None
+
+    _quarantine_count += 1
+
+    credential_subject = {
+        "filePath": file_path,
+        "quarantinedPath": locked_path,
+        "diffHash": diff_hash,
+        "filterResult": {
+            "pass": False,
+            "reason": "; ".join(v["issue"] for v in violation_log),
+        },
+        "violation_log": violation_log,
+        "quarantine": {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "action": "file_locked",
+        },
+    }
+    receipt_data = {
+        "@context": "https://www.w3.org/ns/credentials/v2",
+        "type": ["SovereignReceipt", "QuarantineReceipt"],
+        "issuer": "Aletheia Sovereign Node",
+        "credentialSubject": credential_subject,
+        "TEE_Measurement_Hash": "placeholder_tee_hash",
+        "Sandbox_Public_Key_Registry_Link": "https://example.com/registry",
+        "Causal_Filter_Signature": "",
+    }
+    signature = sign_receipt(credential_subject)
+    receipt_data["Causal_Filter_Signature"] = signature
+
+    print("\nGenerated Quarantine Receipt (JSON-LD):")
+    print(json.dumps(receipt_data, indent=4))
+
+    ok = verify_receipt(credential_subject, signature)
+    print(f"Signature self-check: {'VALID' if ok else 'INVALID'}")
+    return receipt_data
+
+
+# ---------------------------------------------------------------------------
+# Receipt Broadcast (UDP Heartbeat)
+# ---------------------------------------------------------------------------
+# Persistent node ID for the lifetime of this process
+_NODE_ID = str(uuid.uuid4())
+_BROADCAST_PORT = int(os.environ.get("ALETHEIA_BROADCAST_PORT", "12345"))
+_start_time = time.time()
+
+
+def broadcast_heartbeat():
+    """
+    UDP server that responds to ``ping`` messages with a signed Heartbeat
+    Receipt.  Runs as a daemon thread so other TMRP tools on the LAN can
+    verify this node's security status.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("", _BROADCAST_PORT))
+    except OSError as e:
+        print(f"[Heartbeat] Could not bind port {_BROADCAST_PORT}: {e}")
+        return
+
+    print(f"[Heartbeat] Broadcast server listening on UDP :{_BROADCAST_PORT}")
+
+    while True:
+        try:
+            data, addr = sock.recvfrom(1024)
+        except OSError:
+            break
+        if data.decode(errors="replace").strip().lower() == "ping":
+            credential_subject = {
+                "nodeId": _NODE_ID,
+                "status": "Secure",
+                "lastScan": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "health": {
+                    "quarantineCount": _quarantine_count,
+                    "uptimeSeconds": round(time.time() - _start_time, 1),
+                },
+            }
+            heartbeat = {
+                "@context": "https://www.w3.org/ns/credentials/v2",
+                "type": ["HeartbeatReceipt"],
+                "issuer": "Aletheia Sovereign Node",
+                "credentialSubject": credential_subject,
+                "Causal_Filter_Signature": sign_receipt(credential_subject),
+            }
+            sock.sendto(json.dumps(heartbeat).encode(), addr)
+            print(f"[Heartbeat] Sent to {addr[0]}:{addr[1]}")
+
+
+# ---------------------------------------------------------------------------
 # File-change cache
 # ---------------------------------------------------------------------------
 file_cache: dict[str, list[str]] = {}
@@ -249,6 +363,9 @@ class AgentXrayHandler(FileSystemEventHandler):
             print(line.rstrip())
 
         if file_path.endswith(".py"):
+            global _last_scan_time
+            _last_scan_time = time.time()
+
             new_content = "".join(new_lines)
             filter_pass, reason, violation_log = check_causal_filter(new_content)
             status = "Green" if filter_pass else "Red"
@@ -259,38 +376,47 @@ class AgentXrayHandler(FileSystemEventHandler):
                 for v in violation_log:
                     print(f"  [{v['severity'].upper()}] line {v['line']}: {v['issue']}")
 
-            # Build the Sovereign Receipt
             diff_str = "".join(diff)
             diff_hash = hashlib.sha256(diff_str.encode()).hexdigest()
-            credential_subject = {
-                "filePath": file_path,
-                "diffHash": diff_hash,
-                "filterResult": {"pass": filter_pass, "reason": reason},
-                "violation_log": violation_log,
-            }
-            receipt_data = {
-                "@context": "https://www.w3.org/ns/credentials/v2",
-                "type": ["SovereignReceipt"],
-                "issuer": "Aletheia-Core Watcher",
-                "credentialSubject": credential_subject,
-                "TEE_Measurement_Hash": "placeholder_tee_hash",
-                "Sandbox_Public_Key_Registry_Link": "https://example.com/registry",
-                "Causal_Filter_Signature": "",
-            }
-            signature = sign_receipt(credential_subject)
-            receipt_data["Causal_Filter_Signature"] = signature
 
-            print("\nGenerated Sovereign Receipt (JSON-LD):")
-            print(json.dumps(receipt_data, indent=4))
+            if not filter_pass:
+                # --- Active Interlock: quarantine the file ---
+                quarantine_file(file_path, diff_hash, violation_log)
+                # Remove quarantined path from cache; the .locked file
+                # won't be monitored as a .py file.
+                file_cache.pop(file_path, None)
+            else:
+                # --- Standard Sovereign Receipt for clean code ---
+                credential_subject = {
+                    "filePath": file_path,
+                    "diffHash": diff_hash,
+                    "filterResult": {"pass": filter_pass, "reason": reason},
+                    "violation_log": violation_log,
+                }
+                receipt_data = {
+                    "@context": "https://www.w3.org/ns/credentials/v2",
+                    "type": ["SovereignReceipt"],
+                    "issuer": "Aletheia-Core Watcher",
+                    "credentialSubject": credential_subject,
+                    "TEE_Measurement_Hash": "placeholder_tee_hash",
+                    "Sandbox_Public_Key_Registry_Link": "https://example.com/registry",
+                    "Causal_Filter_Signature": "",
+                }
+                signature = sign_receipt(credential_subject)
+                receipt_data["Causal_Filter_Signature"] = signature
 
-            # Optionally verify immediately
-            ok = verify_receipt(credential_subject, signature)
-            print(f"Signature self-check: {'VALID' if ok else 'INVALID'}")
+                print("\nGenerated Sovereign Receipt (JSON-LD):")
+                print(json.dumps(receipt_data, indent=4))
+
+                ok = verify_receipt(credential_subject, signature)
+                print(f"Signature self-check: {'VALID' if ok else 'INVALID'}")
+
+                # Update the cache only for clean files
+                file_cache[file_path] = new_lines
         else:
             print("\nNon-Python file: Skipping Causal Filter.")
+            file_cache[file_path] = new_lines
 
-        # Update the cache
-        file_cache[file_path] = new_lines
         print("=" * 60)
 
     def on_created(self, event):
@@ -323,7 +449,13 @@ def run_watcher(repo_path: str = "."):
     observer = Observer()
     observer.schedule(event_handler, repo_path, recursive=True)
     observer.start()
+
+    # Start the UDP heartbeat broadcast in a daemon thread
+    heartbeat_thread = threading.Thread(target=broadcast_heartbeat, daemon=True)
+    heartbeat_thread.start()
+
     print(f"Agent X-ray Watcher active — monitoring {repo_path}")
+    print(f"Node ID: {_NODE_ID}")
     print(f"Public key (hex): {_verifying_key.to_string().hex()}")
     print("Press Ctrl+C to stop.\n")
     try:
