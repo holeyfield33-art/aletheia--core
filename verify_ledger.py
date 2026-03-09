@@ -46,9 +46,17 @@ def main() -> None:
 
     print(f"Verifying {len(rows)} receipts...\n")
     prev_hash = ""
+    prev_id = 0
     all_good = True
 
     for rid, ts, fpath, status, receipt_json, stored_hash in rows:
+        # --- Detect missing rows (ID gaps) ---
+        if rid != prev_id + 1:
+            print(f"  GAP DETECTED: expected ID {prev_id + 1}, got ID {rid} "
+                  f"(receipts {prev_id + 1}–{rid - 1} missing)")
+            all_good = False
+        prev_id = rid
+
         receipt = json.loads(receipt_json)
 
         # --- Verify hash chain ---
@@ -76,6 +84,8 @@ def main() -> None:
 
         prev_hash = stored_hash if stored_hash else computed_hash
 
+    print(f"\nChain Tip (last hash): {prev_hash}")
+    print(f"Total receipts: {len(rows)}")
     if all_good:
         print("\nLedger integrity verified.")
     else:
