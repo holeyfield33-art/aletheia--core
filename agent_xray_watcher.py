@@ -344,30 +344,68 @@ def insert_receipt(file_path, status, receipt_data, violations=None):
 
 
 def upgrade_db_add_hash_chain():
-    """Add hash_chain column if missing and backfill existing rows."""
+    """Add hash_chain column if missing, using a transaction and integrity checks."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("PRAGMA table_info(receipts)")
-    columns = [col[1] for col in c.fetchall()]
-    if 'hash_chain' not in columns:
-        c.execute("ALTER TABLE receipts ADD COLUMN hash_chain TEXT")
-        print("[Audit] Added hash_chain column to receipts table.")
+    try:
+        c.execute("BEGIN")
 
-        c.execute("SELECT id, receipt_json FROM receipts ORDER BY id ASC")
+        # Check if column exists
+        c.execute("PRAGMA table_info(receipts)")
+        columns = [col[1] for col in c.fetchall()]
+        if 'hash_chain' not in columns:
+            c.execute("ALTER TABLE receipts ADD COLUMN hash_chain TEXT")
+            print("Added hash_chain column to receipts table.")
+
+        # Get current max id and check for gaps/duplicates
+        c.execute("SELECT COUNT(*), MAX(id) FROM receipts")
+        count, max_id = c.fetchone()
+        if max_id is not None:
+            if count != max_id:
+                print(
+                    f"WARNING: Receipt table may have gaps or deletions "
+                    f"(count={count}, max_id={max_id}). "
+                    f"Chain continuity cannot be guaranteed for backfill."
+                )
+        else:
+            # Empty table, nothing to backfill
+            conn.commit()
+            return
+
+        # Backfill existing rows with a computed chain (only if hash_chain is NULL)
+        c.execute(
+            "SELECT id, receipt_json FROM receipts "
+            "WHERE hash_chain IS NULL ORDER BY id ASC"
+        )
         rows = c.fetchall()
-        prev_hash = ""
-        for row_id, receipt_json in rows:
-            chain_hash = hashlib.sha256(
-                (prev_hash + receipt_json).encode('utf-8')
-            ).hexdigest()
+        if rows:
+            # Get previous hash from the last row that already has a chain
             c.execute(
-                "UPDATE receipts SET hash_chain = ? WHERE id = ?",
-                (chain_hash, row_id),
+                "SELECT hash_chain FROM receipts "
+                "WHERE hash_chain IS NOT NULL ORDER BY id DESC LIMIT 1"
             )
-            prev_hash = chain_hash
+            prev_row = c.fetchone()
+            prev_hash = prev_row[0] if prev_row else ""
+
+            for row_id, receipt_json in rows:
+                chain_hash = hashlib.sha256(
+                    (prev_hash + receipt_json).encode('utf-8')
+                ).hexdigest()
+                c.execute(
+                    "UPDATE receipts SET hash_chain = ? WHERE id = ?",
+                    (chain_hash, row_id),
+                )
+                prev_hash = chain_hash
+
+            print(f"Backfilled {len(rows)} receipts with hash chain.")
         conn.commit()
-        print(f"[Audit] Backfilled {len(rows)} existing receipts with hash chain.")
-    conn.close()
+        print("Hash chain upgrade completed successfully.")
+    except Exception as e:
+        conn.rollback()
+        print(f"Error during upgrade: {e}")
+        raise
+    finally:
+        conn.close()
 
 
 def get_chain_tip() -> str:

@@ -2,3 +2,4 @@ __pycache__/
 audit.sqlite
 audit.sqlite-journal
 *.locked
+signed_report.json
