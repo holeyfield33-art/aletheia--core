@@ -308,18 +308,64 @@ def init_db():
 
 
 def insert_receipt(file_path, status, receipt_data, violations=None):
-    """Insert a receipt into the audit database."""
+    """
+    Insert a receipt into the audit database with hash chaining.
+    Each row's hash_chain is SHA-256(prev_hash + receipt_json), forming
+    a tamper-evident chain.
+    """
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    timestamp = receipt_data.get(
+        'validFrom',
+        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    )
     receipt_json = json.dumps(receipt_data, ensure_ascii=False)
     violation_json = json.dumps(violations) if violations else None
+
+    # Get the last hash_chain value
+    c.execute("SELECT hash_chain FROM receipts ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+    prev_hash = row[0] if row else ""
+
+    # Compute new chain hash
+    chain_hash = hashlib.sha256(
+        (prev_hash + receipt_json).encode('utf-8')
+    ).hexdigest()
+
     c.execute(
-        "INSERT INTO receipts (timestamp, file_path, status, receipt_json, violation_log) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (timestamp, file_path, status, receipt_json, violation_json),
+        "INSERT INTO receipts "
+        "(timestamp, file_path, status, receipt_json, violation_log, hash_chain) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (timestamp, file_path, status, receipt_json, violation_json, chain_hash),
     )
     conn.commit()
+    conn.close()
+
+
+def upgrade_db_add_hash_chain():
+    """Add hash_chain column if missing and backfill existing rows."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("PRAGMA table_info(receipts)")
+    columns = [col[1] for col in c.fetchall()]
+    if 'hash_chain' not in columns:
+        c.execute("ALTER TABLE receipts ADD COLUMN hash_chain TEXT")
+        print("[Audit] Added hash_chain column to receipts table.")
+
+        c.execute("SELECT id, receipt_json FROM receipts ORDER BY id ASC")
+        rows = c.fetchall()
+        prev_hash = ""
+        for row_id, receipt_json in rows:
+            chain_hash = hashlib.sha256(
+                (prev_hash + receipt_json).encode('utf-8')
+            ).hexdigest()
+            c.execute(
+                "UPDATE receipts SET hash_chain = ? WHERE id = ?",
+                (chain_hash, row_id),
+            )
+            prev_hash = chain_hash
+        conn.commit()
+        print(f"[Audit] Backfilled {len(rows)} existing receipts with hash chain.")
     conn.close()
 
 
@@ -643,6 +689,7 @@ def run_watcher(repo_path: str = "."):
         sys.exit(1)
 
     init_db()
+    upgrade_db_add_hash_chain()
     print(f"[Audit] Database at {DB_PATH}")
 
     event_handler = AgentXrayHandler(repo_path)
