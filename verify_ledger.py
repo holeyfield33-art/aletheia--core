@@ -64,16 +64,25 @@ def main() -> None:
         rid, ts, fpath, status, receipt_json, stored_hash = row
         receipt = json.loads(receipt_json)
 
+        # Identify receipt type
+        receipt_type = receipt.get('type', ['SovereignReceipt'])
+        if 'QuarantineReceipt' in receipt_type:
+            type_label = 'Quarantine'
+        elif 'HeartbeatReceipt' in receipt_type:
+            type_label = 'Heartbeat'
+        else:
+            type_label = 'Standard'
+
         # Verify hash chain
         computed_hash = hashlib.sha256(
             (prev_hash + receipt_json).encode('utf-8')
         ).hexdigest()
         if computed_hash != stored_hash:
-            print(f"  Hash mismatch at ID {rid}: "
+            print(f"  Hash mismatch at ID {rid} [{type_label}]: "
                   f"stored {stored_hash}, computed {computed_hash}")
             all_good = False
         else:
-            print(f"  Hash OK at ID {rid}")
+            print(f"  Hash OK at ID {rid} [{type_label}]")
 
         # Verify signature
         data, sig = extract_signature_and_data(receipt)

@@ -500,6 +500,18 @@ def get_tee_measurement() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Signed Report Hash
+# ---------------------------------------------------------------------------
+def get_report_hash(report_path: str = 'signed_report.json') -> str:
+    """Return the SHA-256 hash of the latest signed_report.json, or a fallback."""
+    if os.path.exists(report_path):
+        with open(report_path, 'r') as f:
+            report_data = f.read()
+        return hashlib.sha256(report_data.encode()).hexdigest()
+    return "no_report_generated"
+
+
+# ---------------------------------------------------------------------------
 # Receipt Broadcast (UDP Heartbeat)
 # ---------------------------------------------------------------------------
 # Persistent node ID for the lifetime of this process
@@ -531,12 +543,14 @@ def broadcast_heartbeat():
             break
         if data.decode(errors="replace").strip().lower() == "ping":
             chain_tip = get_chain_tip()
+            report_hash = get_report_hash()
             credential_subject = {
                 "nodeId": _NODE_ID,
                 "status": "Secure",
                 "lastScan": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "teeMeasurement": get_tee_measurement(),
                 "chainTip": chain_tip,
+                "reportHash": report_hash,
                 "health": {
                     "quarantineCount": _quarantine_count,
                     "uptimeSeconds": round(time.time() - _start_time, 1),
@@ -551,7 +565,7 @@ def broadcast_heartbeat():
             }
             sock.sendto(json.dumps(heartbeat).encode(), addr)
             print(f"[Heartbeat] Ping reply -> {addr[0]}:{addr[1]} "
-                  f"(Chain Tip: {chain_tip[:10]}...)")
+                  f"(Chain Tip: {chain_tip[:10]}..., Report Hash: {report_hash[:10]}...)")
 
 
 def send_heartbeat(broadcast_addr: tuple[str, int] = ('255.255.255.255', 12345)):
@@ -567,11 +581,13 @@ def send_heartbeat(broadcast_addr: tuple[str, int] = ('255.255.255.255', 12345))
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         tee_hash = get_tee_measurement()
         chain_tip = get_chain_tip()
+        report_hash = get_report_hash()
         credential_subject = {
             "nodeId": _NODE_ID,
             "timestamp": timestamp,
             "teeMeasurement": tee_hash,
             "chainTip": chain_tip,
+            "reportHash": report_hash,
             "status": "Secure",
             "health": {
                 "quarantineCount": _quarantine_count,
@@ -589,7 +605,8 @@ def send_heartbeat(broadcast_addr: tuple[str, int] = ('255.255.255.255', 12345))
         try:
             sock.sendto(json.dumps(heartbeat_data).encode(), broadcast_addr)
             print(f"[Heartbeat] Broadcast: {timestamp} "
-                  f"(TEE: {tee_hash[:10]}..., Chain Tip: {chain_tip[:10]}...)")
+                  f"(TEE: {tee_hash[:10]}..., Chain Tip: {chain_tip[:10]}..., "
+                  f"Report Hash: {report_hash[:10]}...)")
         except OSError as e:
             print(f"[Heartbeat] Broadcast failed: {e}")
         time.sleep(60)
