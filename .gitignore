@@ -4,3 +4,4 @@ audit.sqlite-journal
 *.locked
 signed_report.json
 compliance_certificate_*/
+compliance_certificate_*.zip
