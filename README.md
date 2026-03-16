@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="Aletheia" width="200"/>
+</p>
+
 # aletheia-core
 
 TMRP — Trusted Machine-Readable Provenance
@@ -127,6 +131,12 @@ audit.sqlite              # Auto-created SQLite audit DB (gitignored)
 README.md
 ```
 
+## Links
+
+- 🌐 **Aletheia Sovereign Systems:** https://holeyfield33-art.github.io/unitarity-lab
+- ☕ **Support:** https://buymeacoffee.com/holeyfielde
+- 🐙 **GitHub:** https://github.com/holeyfield33-art/aletheia--core
+
 ## License
 
-See repository for license details.
+MIT — Copyright (c) 2026 Ashura Joseph Holeyfield — Aletheia Sovereign Systems
