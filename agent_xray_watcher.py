@@ -284,8 +284,8 @@ def verify_receipt(data_dict, signature_hex):
     """
     data_json = json.dumps(data_dict, sort_keys=True, separators=(',', ':'))
     data_bytes = data_json.encode('utf-8')
-    sig_bytes = bytes.fromhex(signature_hex)
     try:
+        sig_bytes = bytes.fromhex(signature_hex)
         return _verifying_key.verify(sig_bytes, data_bytes)
     except Exception:
         return False
