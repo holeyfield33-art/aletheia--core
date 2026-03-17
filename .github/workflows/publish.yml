@@ -73,5 +73,6 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        # Uses trusted publishing (OIDC) — no API token needed.
-        # Configure at: https://pypi.org/manage/project/aletheia-core/settings/publishing/
+        with:
+          verbose: true
+          attestations: false
