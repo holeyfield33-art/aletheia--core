@@ -68,3 +68,32 @@ class TestCausalFilterSyntaxError:
         assert "Syntax error" in summary
         assert len(violations) == 1
         assert violations[0]["category"] == "parse_error"
+
+
+class TestCausalFilterEdgeCases:
+    """Edge cases for dotted imports and attribute calls."""
+
+    def test_import_http_client_detected(self):
+        code = "import http.client\n"
+        passed, _summary, violations = check_causal_filter(code)
+        assert passed is False
+        assert any("http.client" in v["issue"] for v in violations)
+
+    def test_from_http_client_detected(self):
+        code = "from http.client import HTTPConnection\n"
+        passed, _summary, violations = check_causal_filter(code)
+        assert passed is False
+        assert any("http.client" in v["issue"] for v in violations)
+
+    def test_indirect_attribute_call_not_false_positive(self):
+        code = (
+            "class Wrapper:\n"
+            "    def __init__(self, target):\n"
+            "        self.target = target\n"
+            "\n"
+            "w = Wrapper(None)\n"
+            "w.target.system('echo harmless in test')\n"
+        )
+        passed, _summary, violations = check_causal_filter(code)
+        assert passed is True
+        assert violations == []

@@ -40,6 +40,14 @@ _SEVERITY_MAP = {
 }
 
 
+def _is_dangerous_module(module_name: str, dangerous_modules: set[str]) -> bool:
+    """Return True when a module or its root package is blocked."""
+    if module_name in dangerous_modules:
+        return True
+    root_module = module_name.split('.')[0]
+    return root_module in dangerous_modules
+
+
 def check_causal_filter(code_str):
     """
     Scan Python code for lateral movement indicators.
@@ -98,8 +106,8 @@ def check_causal_filter(code_str):
         # --- Dangerous imports ---
         if isinstance(node, ast.Import):
             for alias in node.names:
-                mod_name = alias.name.split('.')[0]
-                if mod_name in DANGEROUS_MODULES:
+                mod_name = alias.name
+                if _is_dangerous_module(mod_name, DANGEROUS_MODULES):
                     violation_log.append({
                         "line": node.lineno,
                         "issue": f"import of dangerous module '{mod_name}'",
@@ -108,8 +116,8 @@ def check_causal_filter(code_str):
                     })
         elif isinstance(node, ast.ImportFrom):
             if node.module:
-                mod_name = node.module.split('.')[0]
-                if mod_name in DANGEROUS_MODULES:
+                mod_name = node.module
+                if _is_dangerous_module(mod_name, DANGEROUS_MODULES):
                     violation_log.append({
                         "line": node.lineno,
                         "issue": f"import from dangerous module '{mod_name}'",
