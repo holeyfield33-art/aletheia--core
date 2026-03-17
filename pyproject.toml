@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aletheia-core"
+version = "1.6.1"
+description = "Trusted Machine-Readable Provenance (TMRP) monitoring engine with AST causal filter, ECDSA-signed receipts, and tamper-evident audit ledger"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Ashura Joseph Holeyfield", email = "aletheia@example.com"},
+]
+keywords = ["provenance", "tmrp", "audit", "ecdsa", "security", "ast", "compliance"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "watchdog>=3.0.0",
+    "ecdsa>=0.18.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/holeyfield33-art/aletheia--core"
+Repository = "https://github.com/holeyfield33-art/aletheia--core"
+Issues = "https://github.com/holeyfield33-art/aletheia--core/issues"
+
+[project.scripts]
+aletheia-watch = "agent_xray_watcher:run_watcher"
+aletheia-verify = "verify_ledger:main"
+
+[tool.setuptools]
+py-modules = ["agent_xray_watcher", "verify_ledger", "generate_compliance_certificate"]
+
+[tool.setuptools.packages.find]
+exclude = ["tests*", "watched_dir*", "compliance_certificate_*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
