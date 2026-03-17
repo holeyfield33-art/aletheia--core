@@ -96,7 +96,7 @@ def check_causal_filter(code_str):
 
     try:
         tree = ast.parse(code_str)
-    except SyntaxError as e:
+    except (SyntaxError, ValueError) as e:
         return False, f"Syntax error: {e}", [{
             "line": 0, "issue": f"Syntax error: {e}",
             "severity": "critical", "category": "parse_error",
